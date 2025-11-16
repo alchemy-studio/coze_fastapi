@@ -1,0 +1,23 @@
+# version: "3.8"
+services:
+  coze-fastapi:
+    # image: ghcr.io/alchemy-studio/coze-fastapi:latest
+    image: localhost/coze-fastapi:latest
+    container_name: coze-fastapi
+    tty: true
+    stdin_open: true  # 启用标准输入，支持交互式 shell
+    command: /bin/bash -c "tail -f /dev/null"  # 保持容器运行，不自动启动服务
+    ports:
+      - "${HOST_PORT:-6000}:6000"  # 使用环境变量，默认 6000，容器内固定为 6000
+    volumes:
+      - .:/coze-fastapi:Z
+    # 注意：不设置内存限制，让容器使用 Podman VM 的所有可用内存
+    # 如果遇到 OOM，建议增加 Podman Desktop 的 VM 内存到 8.5GB 或 9GB
+    # mem_limit: 0  # 0 表示无限制（默认）
+    # memswap_limit: 0  # 0 表示无限制（默认）
+
+# podman-compose -f podman-compose_dev.yml up -d --force-recreate
+# podman-compose -f podman-compose_dev.yml exec coze-fastapi /bin/bash
+# podman-compose -f podman-compose_dev.yml down
+# podman push ghcr.io/alchemy-studio/coze-fastapi:latest
+

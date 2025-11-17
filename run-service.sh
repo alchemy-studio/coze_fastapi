@@ -81,7 +81,6 @@ if [ $# -gt 0 ]; then
             MODE="local"
             ENABLE_AUTH="false"
             LOG_LEVEL="DEBUG"
-            HOST="127.0.0.1"
             log_info "Detected parameter: test - Switching to local test mode"
             ;;
         deployment)
@@ -93,7 +92,7 @@ if [ $# -gt 0 ]; then
             ;;
         -h|--help)
             echo "Usage: $0 [test|deployment]"
-            echo "  test: Local mode, disable authentication, DEBUG log level, listen on 127.0.0.1"
+            echo "  test: Local mode, disable authentication, DEBUG log level, listen on 0.0.0.0"
             echo "  deployment: Remote mode, enable authentication, INFO log level, listen on 0.0.0.0 (default)"
             echo "  no parameter: Default to remote mode, enable authentication, INFO log level"
             exit 0
@@ -368,6 +367,8 @@ export ENABLE_AUTH="$ENABLE_AUTH"
 export COZE_LOG_LEVEL="$LOG_LEVEL"
 export PORT="$PORT"
 export HOST="$HOST"
+export COZE_API_URL="${COZE_API_URL:-https://api.coze.cn/v3/chat}"
+export COZE_BASE_URL="${COZE_BASE_URL:-https://api.coze.cn/v3}"
 
 log_info "FastAPI configuration:"
 log_info "  Mode: $MODE"
@@ -376,9 +377,10 @@ log_info "  Log level: $LOG_LEVEL"
 log_info "  Host: $HOST"
 log_info "  Port: $PORT"
 log_info "  Startup command: uv run uvicorn app.main:app --host $HOST --port $PORT"
+log_info "  Coze API URL: ${COZE_API_URL}"
 
 # 使用全局Python，通过uv运行
-tmux send-keys -t coze-fastapi:service.1 "cd '$PWD' && echo 'Coze FastAPI Service' && echo '====================' && export APP_MODE='$MODE' && export ENABLE_AUTH='$ENABLE_AUTH' && export COZE_LOG_LEVEL='$LOG_LEVEL' && export PORT='$PORT' && export HOST='$HOST' && uv run uvicorn app.main:app --host $HOST --port $PORT" Enter || {
+tmux send-keys -t coze-fastapi:service.1 "cd '$PWD' && echo 'Coze FastAPI Service' && echo '====================' && export APP_MODE='$MODE' && export ENABLE_AUTH='$ENABLE_AUTH' && export COZE_LOG_LEVEL='$LOG_LEVEL' && export PORT='$PORT' && export HOST='$HOST' && export COZE_API_URL='$COZE_API_URL' && export COZE_BASE_URL='$COZE_BASE_URL' && uv run uvicorn app.main:app --host $HOST --port $PORT" Enter || {
     log_error "Unable to start FastAPI service"
     exit 1
 }
@@ -442,8 +444,8 @@ log_success "Service started successfully!"
 echo
 log_info "=== Service Access Information ==="
 if [ "$MODE" = "local" ]; then
-    log_info "FastAPI API address: http://127.0.0.1:${PORT}"
-    log_info "Health check endpoint: http://127.0.0.1:${PORT}/coze/health"
+    log_info "FastAPI API address: http://localhost:${PORT}"
+    log_info "Health check endpoint: http://localhost:${PORT}/coze/health"
     log_info "Authentication: Disabled, direct access to all endpoints"
 else
     log_info "FastAPI API address: http://0.0.0.0:${PORT}"

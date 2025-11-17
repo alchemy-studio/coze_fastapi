@@ -30,11 +30,12 @@ coze_fastapi/
 ## 特性
 
 - 使用 FastAPI 框架，支持异步处理
+- 与 `ai-api` 的 Coze 模块统一的数据结构与响应格式
 - 使用 uv 管理 Python 依赖
 - 容器内端口固定为 6000，主机端口可配置
 - 保持与原有接口的兼容性（`/coze/*` 路径）
 - 支持认证验证（可通过环境变量禁用）
-- 异步 Redis 客户端
+- 异步 Redis 客户端与 Coze API 调度，可同时处理多用户会话
 - 完整的错误处理和日志记录
 
 ## 快速开始
@@ -59,9 +60,27 @@ export ALCHEMY_HOST=alchemy-studio.cn
 export MOICEN_HOST=moicen.com
 export HUIWINGS_HOST=huiwings.cn
 export LOCAL_HOST=localhost
+
+# 其余可选项参考 app/config.py
 ```
 
-### 2. 本地开发
+> 提示：未设置 `COZE_API_URL/COZE_BASE_URL` 时，`app/config.py` 会在 `APP_MODE=remote` 下默认连官方云 `https://api.coze.cn/v3/chat`；`APP_MODE=local` 时则回落到 `http://localhost:5000/coze/v3/chat`，与 `ai-api` 行为一致。
+
+### 2. 运行脚本（推荐）
+
+完整运行流程与 `ai-api` 保持相同，包含 Redis、FastAPI、日志三个 tmux 面板：
+
+```bash
+# 远程模式（默认、启用认证、Host 0.0.0.0）
+./run-service.sh deployment
+
+# 本地测试模式（禁用认证、Host 0.0.0.0，用于调试）
+./run-service.sh test
+```
+
+脚本会导出 `APP_MODE/ENABLE_AUTH/COZE_API_URL/...` 供 FastAPI 读取，并在启动后自动进行健康检查。
+
+### 3. 本地开发（手动）
 
 ```bash
 # 安装依赖（使用 uv）
@@ -71,7 +90,7 @@ uv sync
 uv run uvicorn app.main:app --host 0.0.0.0 --port 6000 --reload
 ```
 
-### 3. 容器化部署
+### 4. 容器化部署
 
 ```bash
 # 构建镜像
@@ -145,6 +164,8 @@ GET /coze/sessions/{session_id}
 DELETE /coze/sessions/{session_id}
 ```
 
+> 所有接口返回体中的 `data.task_result` 与 `ai-api` 完全一致：会再嵌套一层 `success/timestamp/data`，需要的 `session_id` 等字段位于 `task_result.data.session_id`。
+
 ## 配置说明
 
 ### 端口配置
@@ -156,6 +177,11 @@ DELETE /coze/sessions/{session_id}
 
 - `ENABLE_AUTH`: 是否启用认证（默认：true）
 - 认证通过 `HtySudoerToken` 和 `HtyHost` 请求头进行验证
+
+### 并发说明
+
+- FastAPI 路由、Redis 客户端、Coze API 调用均为异步实现，可同时处理多个会话/消息请求
+- 若需要更高吞吐，可在 `run-service.sh` 中自定义 `uvicorn` worker/loop 参数或部署多个容器实例
 
 ## 技术栈
 

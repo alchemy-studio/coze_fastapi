@@ -10,6 +10,7 @@ from .exceptions import (
     CozeValidationError, CozeAPIError, CozeRedisError,
     CozeConfigError, CozeSessionError
 )
+from .utils import format_timestamp, get_current_timestamp
 
 logger = get_coze_logger()
 
@@ -24,6 +25,7 @@ def create_error_response(error_message: str, status_code: int = 400,
         "error": {
             "message": error_message,
             "code": error_code or f"COZE_ERROR_{status_code}",
+            "timestamp": format_timestamp(get_current_timestamp()),
         },
         "data": None,
         "task_id": task_id,

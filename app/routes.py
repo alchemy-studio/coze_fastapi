@@ -17,7 +17,7 @@ from .tasks import (
 from .auth import verify_request_header_host_token
 
 # 创建路由器
-router = APIRouter(prefix="/coze", tags=["coze"])
+router = APIRouter(tags=["coze"])
 
 # 全局日志记录器
 logger = get_coze_logger()

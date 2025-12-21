@@ -73,7 +73,7 @@ class CozeConfig:
         self.base_url = os.getenv("COZE_BASE_URL", default_base_url)
         
         # 使用真实的token和bot_id
-        default_token = "pat_JQAbyDeIonObBSmP44tM9xlzuBY19T8PiEeQTOVbNEsideQmMMhQy8FULNy6twZC"
+        default_token = "pat_jChd0dCGmjWX7Uk770qdofQ3W2AqieGxBAeZSPYMk6aOWSD8XZKal0V0XWvI663k"
         default_bot_id = "7486362828392284194"
         self.authorization = os.getenv("COZE_AUTHORIZATION", f"Bearer {os.getenv('COZE_API_TOKEN', default_token)}")
         self.bot_id = os.getenv("COZE_BOT_ID", default_bot_id)

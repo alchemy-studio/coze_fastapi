@@ -10,6 +10,9 @@ services:
     ports:
       - "${HOST_PORT:-6000}:6000"  # 使用环境变量，默认 6000，容器内固定为 6000
     volumes:
+      # 挂载整个项目目录，包括 .env 文件（方案1：Volume 挂载）
+      # 注意：.env 文件不会被提交到 Git（已在 .gitignore 中）
+      # 开发时修改 .env 后容器内立即生效，无需重建镜像
       - .:/coze-fastapi:Z
     # 注意：不设置内存限制，让容器使用 Podman VM 的所有可用内存
     # 如果遇到 OOM，建议增加 Podman Desktop 的 VM 内存到 8.5GB 或 9GB

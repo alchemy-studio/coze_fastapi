@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 
 from .logging_config import get_coze_logger
+from .config import get_coze_config
 from .error_handlers import create_success_response, create_error_response
 from .exceptions import CozeValidationError, CozeRedisError
 from .models import CozeSession
@@ -65,7 +66,9 @@ async def create_session(request: Request):
             return JSONResponse(status_code=400, content=response_data)
         
         user_id = data.get('user_id')
-        bot_id = data.get('bot_id') or '7486362828392284194'  # 默认bot_id
+        # 从配置中获取默认 bot_id，如果没有提供则使用配置中的值
+        config = get_coze_config()
+        bot_id = data.get('bot_id') or config.bot_id
         
         if not user_id:
             response_data = create_error_response("user_id is required", 400)

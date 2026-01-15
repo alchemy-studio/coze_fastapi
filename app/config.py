@@ -6,6 +6,14 @@ Coze模块配置管理
 import os
 from typing import Optional
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+# 加载 .env 文件（支持从项目根目录或当前目录加载）
+# 优先从项目根目录加载（app 目录的上一级）
+env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+load_dotenv(dotenv_path=env_path, override=False)
+# 也尝试从当前目录加载（容器内可能的工作目录）
+load_dotenv(override=False)
 
 
 @dataclass
@@ -72,11 +80,24 @@ class CozeConfig:
         self.api_url = os.getenv("COZE_API_URL", default_api_url)
         self.base_url = os.getenv("COZE_BASE_URL", default_base_url)
         
-        # 使用真实的token和bot_id
-        default_token = "pat_jChd0dCGmjWX7Uk770qdofQ3W2AqieGxBAeZSPYMk6aOWSD8XZKal0V0XWvI663k"
-        default_bot_id = "7486362828392284194"
-        self.authorization = os.getenv("COZE_AUTHORIZATION", f"Bearer {os.getenv('COZE_API_TOKEN', default_token)}")
-        self.bot_id = os.getenv("COZE_BOT_ID", default_bot_id)
+        # 从环境变量读取 token 和 bot_id，不再使用硬编码默认值
+        coze_api_token = os.getenv("COZE_API_TOKEN")
+        if not coze_api_token:
+            raise ValueError(
+                "COZE_API_TOKEN environment variable is required. "
+                "Please set it in .env file or environment variables."
+            )
+        
+        coze_bot_id = os.getenv("COZE_BOT_ID")
+        if not coze_bot_id:
+            raise ValueError(
+                "COZE_BOT_ID environment variable is required. "
+                "Please set it in .env file or environment variables."
+            )
+        
+        # 构建 authorization header
+        self.authorization = os.getenv("COZE_AUTHORIZATION", f"Bearer {coze_api_token}")
+        self.bot_id = coze_bot_id
         
         self.timeout = int(os.getenv("COZE_TIMEOUT", str(self.timeout)))
         self.max_retries = int(os.getenv("COZE_MAX_RETRIES", str(self.max_retries)))

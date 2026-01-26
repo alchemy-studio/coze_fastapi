@@ -216,3 +216,8 @@ __marimo__/
 *.secret
 *.key
 secrets/
+
+# 开发测试文件
+TROUBLESHOOTING.md
+example.md
+test_coze_api.sh

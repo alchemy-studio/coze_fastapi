@@ -7,6 +7,7 @@ Coze模块异步任务处理
 import time
 import asyncio
 import httpx
+import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 
@@ -375,21 +376,27 @@ async def call_coze_api(user_message_content: str, session_context: Dict[str, An
         logger.info(f"Calling Coze API for chat: {chat_id}")
         
         # 构建API请求
-        api_url = config.api_url
+        # 根据 example.md，chat API URL 末尾需要添加 ? 符号
+        api_url = config.api_url if config.api_url.endswith('?') else f"{config.api_url}?"
         headers = {
             'Authorization': config.authorization,
             'Content-Type': 'application/json',
             'User-Agent': 'CozeModule/1.0.0'
         }
         
+        # 根据配置决定是否使用流式响应
+        # 如果 message/list API 权限不足，可以使用流式响应来获取消息
+        use_stream = os.getenv("COZE_USE_STREAM", "false").lower() in ("true", "1", "yes")
+        
         payload = {
             'bot_id': config.bot_id,
             'user_id': session_context.get('user_id', 'anonymous'),
-            'stream': False,
+            'stream': use_stream,
             'auto_save_history': True,
             'additional_messages': [
                 {
                     'role': 'user',
+                    'type': 'question',
                     'content': user_message_content,
                     'content_type': 'text',
                 },
@@ -415,6 +422,7 @@ async def call_coze_api(user_message_content: str, session_context: Dict[str, An
             
             # 解析响应
             api_data = response.json()
+            logger.debug(f"Chat create response: {api_data}")
             
             if api_data.get('code') and api_data.get('code') != 0:
                 raise CozeAPIError(f"API returned error: {api_data.get('msg', 'Unknown error')}")
@@ -423,6 +431,13 @@ async def call_coze_api(user_message_content: str, session_context: Dict[str, An
             data = api_data.get('data') or {}
             api_chat_id = data.get('id')
             conversation_id = data.get('conversation_id')
+            
+            # 检查响应中是否已经包含消息（非流式响应可能直接返回消息）
+            messages_in_response = data.get('messages', [])
+            if messages_in_response:
+                logger.info(f"Found {len(messages_in_response)} messages in create response")
+                # 如果创建响应中已经有消息，直接解析并返回
+                return await _parse_messages(messages_in_response, api_chat_id, conversation_id)
             
             if not api_chat_id or not conversation_id:
                 raise CozeAPIError("No chat_id or conversation_id in API response")
@@ -461,9 +476,81 @@ async def call_coze_api(user_message_content: str, session_context: Dict[str, An
         raise CozeAPIError(f"Unexpected API error: {str(e)}")
 
 
+async def _parse_messages(messages: List[Dict[str, Any]], chat_id: str, conversation_id: str) -> Optional[Dict[str, Any]]:
+    """
+    解析消息列表，提取思考过程、回答和建议
+    
+    Args:
+        messages: 消息列表
+        chat_id: 聊天ID
+        conversation_id: 会话ID
+        
+    Returns:
+        解析后的结果字典或None
+    """
+    assistant_content = ''
+    reasoning_content = ''
+    follow_up_questions = []
+    
+    for msg in messages:
+        if not msg:
+            continue
+            
+        msg_role = msg.get('role', '')
+        msg_type = msg.get('type', '')
+        msg_content = msg.get('content', '')
+        
+        logger.info(f"Processing message: role={msg_role}, type={msg_type}, content={msg_content[:50] if msg_content else 'None'}...")
+        
+        if msg_role == 'assistant':
+            if msg_type == 'answer':
+                # 主要回答内容
+                assistant_content = msg_content
+                logger.info(f"Found assistant answer: {len(assistant_content)} chars")
+            elif msg_type == 'verbose':
+                # 思考过程
+                reasoning_content = msg_content
+                logger.info(f"Found reasoning content: {len(reasoning_content)} chars")
+            elif msg_type == 'follow_up':
+                # 建议问题
+                if msg_content:
+                    follow_up_questions.append(msg_content)
+                logger.info(f"Found follow-up question: {msg_content}")
+            else:
+                # 如果没有明确的类型，但是assistant消息，可能是主要回答
+                if not assistant_content and msg_content:
+                    assistant_content = msg_content
+                    logger.info(f"Found assistant content (no type): {len(assistant_content)} chars")
+    
+    if assistant_content:
+        result = {
+            'content': assistant_content,
+            'reasoning_content': reasoning_content,
+            'follow_up_questions': follow_up_questions,
+            'metadata': {
+                'chat_id': chat_id,
+                'conversation_id': conversation_id,
+                'response_time': time.time(),
+                'message_count': len(messages)
+            }
+        }
+        logger.info(f"Parsed result: content={len(assistant_content)} chars, reasoning={len(reasoning_content)} chars, questions={len(follow_up_questions)}")
+        return result
+    
+    logger.warning("No assistant answer found in messages")
+    return None
+
+
 async def _poll_chat_result(chat_id: str, conversation_id: str) -> Optional[Dict[str, Any]]:
     """
     轮询获取聊天结果（异步）
+    根据测试脚本和 example.md，实现有限轮询，根据对话状态判断是否继续
+    
+    轮询逻辑：
+    - 最多轮询30次，每次间隔2秒（最多60秒）
+    - 只有当 status == "in_progress" 时才继续轮询
+    - status == "completed" 时停止轮询，获取消息
+    - status == "failed" 时立即返回 None
     
     Args:
         chat_id: 聊天ID
@@ -472,8 +559,9 @@ async def _poll_chat_result(chat_id: str, conversation_id: str) -> Optional[Dict
     Returns:
         聊天结果或None
     """
-    max_attempts = 60  # 最多轮询60次
-    poll_interval = 2  # 每2秒轮询一次
+    # 根据测试脚本，最多轮询30次，每次间隔2秒，最多60秒
+    max_attempts = 30
+    poll_interval = 2
     
     async with httpx.AsyncClient(timeout=config.timeout) as client:
         headers = {
@@ -483,111 +571,160 @@ async def _poll_chat_result(chat_id: str, conversation_id: str) -> Optional[Dict
         
         for attempt in range(max_attempts):
             try:
-                # 获取聊天状态
-                status_url = f"{config.base_url}/chat/retrieve?chat_id={chat_id}&conversation_id={conversation_id}"
+                # 获取聊天状态 - 参数顺序：conversation_id 在前，chat_id 在后，末尾添加 & 符合 API 格式
+                status_url = f"{config.base_url}/chat/retrieve?conversation_id={conversation_id}&chat_id={chat_id}&"
                 status_response = await client.get(status_url, headers=headers)
                 
                 if status_response.status_code != 200:
                     logger.warning(f"Status check failed: {status_response.status_code}")
+                    # 如果是最后一次尝试，抛出错误
+                    if attempt == max_attempts - 1:
+                        raise CozeAPIError(f"Failed to retrieve chat status after {max_attempts} attempts")
+                    await asyncio.sleep(poll_interval)
+                    continue
+                
+                status_data = status_response.json()
+                # 检查响应体中的 code 字段
+                response_code = status_data.get('code')
+                if response_code and response_code != 0:
+                    error_msg = status_data.get('msg', 'Unknown error')
+                    logger.warning(f"Status API returned error code {response_code}: {error_msg}")
+                    # 如果是认证错误，抛出异常
+                    if response_code == 4100:
+                        raise CozeAPIError(f"Authentication failed: {error_msg}", status_code=401)
+                    # 如果是最后一次尝试，抛出错误
+                    if attempt == max_attempts - 1:
+                        raise CozeAPIError(f"Status API error after {max_attempts} attempts: {error_msg}")
                     await asyncio.sleep(poll_interval)
                     continue
                     
-                status_data = status_response.json()
                 status = status_data.get('data', {}).get('status')
                 
-                logger.info(f"Poll attempt {attempt + 1}: status = {status}")
+                logger.info(f"Poll attempt {attempt + 1}/{max_attempts}: status = {status}")
                 
+                # 根据状态判断下一步操作（参考测试脚本逻辑）
                 if status == 'completed':
-                    # 获取消息列表 - 使用v3 API端点
-                    messages_url = f"https://api.coze.cn/v3/chat/message/list?chat_id={chat_id}&conversation_id={conversation_id}"
-                    messages_response = await client.get(messages_url, headers=headers)
+                    # 首先检查 retrieve 响应是否已经包含消息
+                    retrieve_data = status_data.get('data', {})
+                    messages = retrieve_data.get('messages', [])
                     
-                    logger.info(f"Messages API response status: {messages_response.status_code}")
+                    # 记录 retrieve 响应的数据结构以便调试
+                    logger.debug(f"Retrieve response data keys: {list(retrieve_data.keys()) if isinstance(retrieve_data, dict) else 'not a dict'}")
+                    if not messages:
+                        logger.warning(f"No messages found in retrieve response. Full data structure: {retrieve_data}")
                     
-                    if messages_response.status_code == 200:
-                        messages_data = messages_response.json()
-                        logger.info(f"Messages response: {messages_data}")
+                    # 如果 retrieve 响应中没有消息，调用消息列表 API
+                    if not messages:
+                        logger.info("No messages in retrieve response, calling message list API...")
+                        # 等待一小段时间，确保消息已经准备好（根据 example.md，completed 后消息可能需要一点时间）
+                        await asyncio.sleep(0.5)
                         
-                        # v3 API响应格式: {"data": {"messages": [...]}}
-                        data = messages_data.get('data', {})
-                        # 处理data可能是列表的情况
-                        if isinstance(data, list):
-                            messages = data
-                        elif isinstance(data, dict):
-                            messages = data.get('messages', [])
-                        else:
-                            messages = []
+                        # 使用 /v3/chat/message/list 端点，参数顺序：conversation_id 在前，chat_id 在后，末尾添加 & 符合 API 格式
+                        messages_url = f"{config.base_url}/chat/message/list?conversation_id={conversation_id}&chat_id={chat_id}&"
+                        # 记录请求信息（不记录完整的 token）
+                        auth_header_preview = config.authorization[:20] + "..." if len(config.authorization) > 20 else config.authorization
+                        logger.info(f"Requesting messages from: {messages_url}")
+                        logger.debug(f"Authorization header: {auth_header_preview}")
                         
-                        logger.info(f"Found {len(messages)} messages")
+                        # 重试机制：如果认证失败，可能是 token 权限问题，但先尝试一次
+                        # 确保 headers 格式正确，与 example.md 中的格式一致
+                        messages_response = await client.get(
+                            messages_url, 
+                            headers=headers,
+                            follow_redirects=True
+                        )
                         
-                        # 解析消息，提取思考过程、回答和建议
-                        assistant_content = ''
-                        reasoning_content = ''
-                        follow_up_questions = []
+                        logger.info(f"Messages API response status: {messages_response.status_code}")
                         
-                        for msg in messages:
-                            if not msg:
-                                continue
+                        if messages_response.status_code == 200:
+                            messages_data = messages_response.json()
+                            logger.debug(f"Messages response: {messages_data}")
+                            
+                            # 检查响应体中的 code 字段
+                            response_code = messages_data.get('code')
+                            if response_code and response_code != 0:
+                                error_msg = messages_data.get('msg', 'Unknown error')
+                                logger.error(f"Messages API returned error code {response_code}: {error_msg}")
                                 
-                            msg_role = msg.get('role', '')
-                            msg_type = msg.get('type', '')
-                            msg_content = msg.get('content', '')
-                            
-                            logger.info(f"Processing message: role={msg_role}, type={msg_type}, content={msg_content[:50] if msg_content else 'None'}...")
-                            
-                            if msg_role == 'assistant':
-                                if msg_type == 'answer':
-                                    # 主要回答内容
-                                    assistant_content = msg_content
-                                    logger.info(f"Found assistant answer: {len(assistant_content)} chars")
-                                elif msg_type == 'verbose':
-                                    # 思考过程
-                                    reasoning_content = msg_content
-                                    logger.info(f"Found reasoning content: {len(reasoning_content)} chars")
-                                elif msg_type == 'follow_up':
-                                    # 建议问题
-                                    if msg_content:
-                                        follow_up_questions.append(msg_content)
-                                    logger.info(f"Found follow-up question: {msg_content}")
+                                # 如果是认证错误（4100），说明 token 权限不足
+                                if response_code == 4100:
+                                    error_detail = (
+                                        f"Token authentication failed for message/list API (code 4100). "
+                                        f"This indicates the token lacks permission to access the message/list endpoint. "
+                                        f"Please check your token permissions in Coze platform and ensure 'Message Management' permission is enabled."
+                                    )
+                                    logger.error(error_detail)
+                                    raise CozeAPIError(
+                                        f"Token permission insufficient: {error_msg}. "
+                                        f"Please ensure your token has 'Message Management' permission to access /v3/chat/message/list endpoint.",
+                                        status_code=401
+                                    )
                                 else:
-                                    # 如果没有明确的类型，但是assistant消息，可能是主要回答
-                                    if not assistant_content and msg_content:
-                                         assistant_content = msg_content
-                                         logger.info(f"Found assistant content (no type): {len(assistant_content)} chars")
-                        
-                        if assistant_content:
-                            result = {
-                                'content': assistant_content,
-                                'reasoning_content': reasoning_content,
-                                'follow_up_questions': follow_up_questions,
-                                'metadata': {
-                                    'chat_id': chat_id,
-                                    'conversation_id': conversation_id,
-                                    'response_time': time.time(),
-                                    'message_count': len(messages)
-                                }
-                            }
-                            logger.info(f"Parsed result: content={len(assistant_content)} chars, reasoning={len(reasoning_content)} chars, questions={len(follow_up_questions)}")
-                            return result
-                        
-                        logger.warning("No assistant answer found in completed chat")
-                        return None
+                                    raise CozeAPIError(f"API error {response_code}: {error_msg}")
+                            
+                            # v3 API响应格式: {"code":0,"data":[...]} - data 是数组
+                            data = messages_data.get('data', [])
+                            if isinstance(data, list):
+                                messages = data
+                            elif isinstance(data, dict):
+                                # 兼容处理：如果 data 是对象，尝试获取 messages 字段
+                                messages = data.get('messages', [])
+                            else:
+                                messages = []
+                            
+                            logger.info(f"Retrieved {len(messages)} messages from message list API")
+                        else:
+                            # completed 状态下获取消息失败，应该抛出错误，不再继续轮询
+                            error_text = messages_response.text
+                            logger.error(f"Failed to get messages: {messages_response.status_code} - {error_text}")
+                            raise CozeAPIError(
+                                f"Failed to get messages after chat completed: {messages_response.status_code} - {error_text}",
+                                status_code=messages_response.status_code
+                            )
                     else:
-                        logger.error(f"Failed to get messages: {messages_response.status_code} - {messages_response.text}")
-                        
+                        logger.info(f"Found {len(messages)} messages in retrieve response")
+                    
+                    # 解析消息，提取思考过程、回答和建议
+                    logger.info(f"Found {len(messages)} messages")
+                    result = await _parse_messages(messages, chat_id, conversation_id)
+                    if result:
+                        return result
+                    
+                    # completed 状态下没有找到 assistant 回答，返回 None（不再继续轮询）
+                    logger.warning("No assistant answer found in completed chat")
+                    return None
+                    
                 elif status == 'failed':
+                    # failed 状态立即返回，不再继续轮询
                     logger.error(f"Chat failed: {chat_id}")
                     return None
                     
-                # 继续轮询
-                await asyncio.sleep(poll_interval)
+                elif status == 'in_progress':
+                    # 只有 in_progress 状态才继续轮询
+                    await asyncio.sleep(poll_interval)
+                    continue
+                else:
+                    # 未知状态，记录警告并继续轮询（但有限制）
+                    logger.warning(f"Unknown status: {status}, continuing to poll...")
+                    if attempt == max_attempts - 1:
+                        raise CozeAPIError(f"Chat status remained unknown after {max_attempts} attempts: {status}")
+                    await asyncio.sleep(poll_interval)
+                    continue
                 
+            except CozeAPIError:
+                # 如果是 CozeAPIError，直接抛出，不再继续轮询
+                raise
             except Exception as e:
-                logger.error(f"Error polling chat result: {str(e)}")
+                logger.error(f"Error polling chat result (attempt {attempt + 1}/{max_attempts}): {str(e)}")
+                # 如果是最后一次尝试，抛出错误
+                if attempt == max_attempts - 1:
+                    raise CozeAPIError(f"Failed to poll chat result after {max_attempts} attempts: {str(e)}")
                 await asyncio.sleep(poll_interval)
+                continue
     
-    logger.error(f"Polling timeout for chat: {chat_id}")
-    return None
+    # 如果循环结束还没有返回，说明达到最大尝试次数
+    logger.error(f"Polling timeout for chat: {chat_id} after {max_attempts} attempts")
+    raise CozeAPIError(f"Polling timeout: Chat {chat_id} did not complete within {max_attempts * poll_interval} seconds")
 
 
 # ==================== 清理任务 ====================

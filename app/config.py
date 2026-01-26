@@ -96,7 +96,17 @@ class CozeConfig:
             )
         
         # 构建 authorization header
-        self.authorization = os.getenv("COZE_AUTHORIZATION", f"Bearer {coze_api_token}")
+        # 如果 COZE_AUTHORIZATION 已设置，直接使用；否则使用 COZE_API_TOKEN 构建
+        coze_authorization = os.getenv("COZE_AUTHORIZATION")
+        if coze_authorization:
+            # 如果已经包含 Bearer 前缀，直接使用；否则添加 Bearer 前缀
+            if not coze_authorization.startswith("Bearer "):
+                self.authorization = f"Bearer {coze_authorization}"
+            else:
+                self.authorization = coze_authorization
+        else:
+            # 使用 COZE_API_TOKEN 构建，确保有 Bearer 前缀
+            self.authorization = f"Bearer {coze_api_token}"
         self.bot_id = coze_bot_id
         
         self.timeout = int(os.getenv("COZE_TIMEOUT", str(self.timeout)))

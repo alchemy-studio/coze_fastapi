@@ -221,3 +221,7 @@ secrets/
 TROUBLESHOOTING.md
 example.md
 test_coze_api.sh
+
+# 镜像压缩包
+coze-fastapi.tar.gz
+*.tar.gz

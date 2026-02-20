@@ -10,10 +10,13 @@ services:
     ports:
       - "${HOST_PORT:-6000}:6000"  # 使用环境变量，默认 6000，容器内固定为 6000
     volumes:
-      # 挂载整个项目目录，包括 .env 文件（方案1：Volume 挂载）
-      # 注意：.env 文件不会被提交到 Git（已在 .gitignore 中）
-      # 开发时修改 .env 后容器内立即生效，无需重建镜像
-      - .:/coze-fastapi:Z
+      # 只挂载必要文件，保留镜像内的 .venv（避免被宿主机覆盖）
+      - ./app:/coze-fastapi/app:Z                       # 代码目录（实时修改生效）
+      - ./.env:/coze-fastapi/.env:ro                    # 配置文件
+      - ./logs:/coze-fastapi/logs:Z                     # 日志目录
+      - ./run-service.sh:/coze-fastapi/run-service.sh:Z # 启动脚本
+      - ./pyproject.toml:/coze-fastapi/pyproject.toml:ro # 依赖配置
+      - ./uv.lock:/coze-fastapi/uv.lock:ro              # 依赖锁定
     # 注意：不设置内存限制，让容器使用 Podman VM 的所有可用内存
     # 如果遇到 OOM，建议增加 Podman Desktop 的 VM 内存到 8.5GB 或 9GB
     # mem_limit: 0  # 0 表示无限制（默认）

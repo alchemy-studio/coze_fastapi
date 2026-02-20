@@ -35,6 +35,17 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# 运行环境检查
+run_pre_check() {
+    if [ -f "./pre_check.sh" ]; then
+        log_info "Running environment check..."
+        if ! ./pre_check.sh; then
+            log_error "Environment check failed"
+            exit 1
+        fi
+    fi
+}
+
 # 检查 Podman 是否运行
 check_podman() {
     if ! podman info >/dev/null 2>&1; then
@@ -86,7 +97,8 @@ start_container() {
 # 进入容器
 enter_container() {
     log_info "Entering container..."
-    podman-compose -f podman-compose_dev.yml exec coze-fastapi /bin/bash
+    # 使用 podman exec 替代 podman-compose exec（兼容旧版本 podman-compose）
+    podman exec -it coze-fastapi /bin/bash
 }
 
 # 等待容器就绪
@@ -207,6 +219,9 @@ main() {
     
     case "$command" in
         start)
+            # 运行环境检查
+            run_pre_check
+            
             # 检查 Podman
             check_podman
             
@@ -240,6 +255,7 @@ main() {
             enter_container
             ;;
         restart)
+            run_pre_check
             check_podman
             stop_container
             sleep 2
@@ -250,6 +266,7 @@ main() {
             log_info "Use './podman-run.sh enter' to enter container"
             ;;
         build)
+            run_pre_check
             check_podman
             log_info "Force rebuilding image..."
             if [ -f "./podman-build.sh" ]; then

@@ -590,7 +590,7 @@ async def _poll_chat_result(chat_id: str, conversation_id: str) -> Optional[Dict
                     error_msg = status_data.get('msg', 'Unknown error')
                     logger.warning(f"Status API returned error code {response_code}: {error_msg}")
                     # 如果是认证错误，抛出异常
-                    if response_code == 4100:
+                    if response_code in (4100, 4101):
                         raise CozeAPIError(f"Authentication failed: {error_msg}", status_code=401)
                     # 如果是最后一次尝试，抛出错误
                     if attempt == max_attempts - 1:
@@ -619,8 +619,12 @@ async def _poll_chat_result(chat_id: str, conversation_id: str) -> Optional[Dict
                         # 等待一小段时间，确保消息已经准备好（根据 example.md，completed 后消息可能需要一点时间）
                         await asyncio.sleep(0.5)
                         
-                        # 使用 /v3/chat/message/list 端点，参数顺序：conversation_id 在前，chat_id 在后，末尾添加 & 符合 API 格式
-                        messages_url = f"{config.base_url}/chat/message/list?conversation_id={conversation_id}&chat_id={chat_id}&"
+                        # 根据 Coze 新接口描述，消息列表使用 v1 conversation/message/list
+                        if '/v3' in config.base_url:
+                            messages_base_url = config.base_url.replace('/v3', '/v1', 1)
+                        else:
+                            messages_base_url = f"{config.base_url.rstrip('/')}/v1"
+                        messages_url = f"{messages_base_url}/conversation/message/list?conversation_id={conversation_id}"
                         # 记录请求信息（不记录完整的 token）
                         auth_header_preview = config.authorization[:20] + "..." if len(config.authorization) > 20 else config.authorization
                         logger.info(f"Requesting messages from: {messages_url}")
@@ -646,17 +650,17 @@ async def _poll_chat_result(chat_id: str, conversation_id: str) -> Optional[Dict
                                 error_msg = messages_data.get('msg', 'Unknown error')
                                 logger.error(f"Messages API returned error code {response_code}: {error_msg}")
                                 
-                                # 如果是认证错误（4100），说明 token 权限不足
-                                if response_code == 4100:
+                                # 如果是认证错误（4100/4101），说明 token 具备基础鉴权但缺少会话消息读取权限
+                                if response_code in (4100, 4101):
                                     error_detail = (
-                                        f"Token authentication failed for message/list API (code 4100). "
-                                        f"This indicates the token lacks permission to access the message/list endpoint. "
-                                        f"Please check your token permissions in Coze platform and ensure 'Message Management' permission is enabled."
+                                        f"Token authentication/authorization failed for conversation message list API (code {response_code}). "
+                                        f"This indicates the token lacks permission to access the conversation/message/list endpoint. "
+                                        f"Please check your token permissions in Coze platform and ensure conversation message read scope is enabled."
                                     )
                                     logger.error(error_detail)
                                     raise CozeAPIError(
                                         f"Token permission insufficient: {error_msg}. "
-                                        f"Please ensure your token has 'Message Management' permission to access /v3/chat/message/list endpoint.",
+                                        f"Please ensure your token has permission to access /v1/conversation/message/list endpoint.",
                                         status_code=401
                                     )
                                 else:

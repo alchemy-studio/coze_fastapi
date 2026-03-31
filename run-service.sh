@@ -67,6 +67,95 @@ detect_and_activate_uv() {
     fi
 }
 
+# 检查并自愈 uv 管理的 Python 环境
+ensure_python_env() {
+    local verify_output=""
+    local python_version=""
+    local python_executable=""
+    local python_site_packages=""
+
+    log_info "Verifying Python environment..."
+    if ! verify_output=$(uv run python3 --version 2>&1); then
+        log_warning "Python environment check failed: ${verify_output}"
+        log_warning "Detected broken/incomplete .venv, rebuilding with uv sync..."
+        rm -rf .venv
+        if ! uv sync; then
+            log_error "Failed to rebuild .venv via uv sync"
+            exit 1
+        fi
+        if ! verify_output=$(uv run python3 --version 2>&1); then
+            log_error "Python environment verification failed after rebuild: ${verify_output}"
+            exit 1
+        fi
+    fi
+
+    python_version="${verify_output}"
+    python_executable=$(uv run python3 -c 'import sys; print(sys.executable)' 2>&1)
+    python_site_packages=$(uv run python3 -c 'import site; print(site.getsitepackages()[0])' 2>&1)
+    log_success "Python: ${python_version}"
+    log_info "Python executable: ${python_executable}"
+    log_info "Site-packages: ${python_site_packages}"
+
+    log_info "Verifying critical dependencies..."
+    if uv run python3 -c 'import fastapi, uvicorn, httpx, redis' 2>/dev/null; then
+        log_success "Core dependencies verified"
+    else
+        log_warning "Core dependencies verification failed, rebuilding .venv..."
+        rm -rf .venv
+        if ! uv sync; then
+            log_error "uv sync failed while rebuilding dependencies"
+            exit 1
+        fi
+        if ! uv run python3 -c 'import fastapi, uvicorn, httpx, redis' 2>/dev/null; then
+            log_error "Core dependencies verification failed after rebuild"
+            uv run python3 -c 'import fastapi' 2>&1 || log_error "fastapi not available"
+            uv run python3 -c 'import uvicorn' 2>&1 || log_error "uvicorn not available"
+            uv run python3 -c 'import httpx' 2>&1 || log_error "httpx not available"
+            uv run python3 -c 'import redis' 2>&1 || log_error "redis not available"
+            exit 1
+        fi
+        log_success "Core dependencies verified after rebuild"
+    fi
+
+    log_success "All dependencies verified (using uv managed environment)"
+}
+
+# 检查日志目录与文件写权限，提前暴露权限问题
+ensure_logs_writable() {
+    local log_dir="logs"
+    local daily_log_file="${log_dir}/coze-fastapi_$(date +%Y-%m-%d).log"
+
+    log_info "Checking log directory and write permissions..."
+    mkdir -p "${log_dir}" 2>/dev/null || true
+
+    if [ ! -d "${log_dir}" ]; then
+        log_error "Log directory '${log_dir}' does not exist and could not be created"
+        exit 1
+    fi
+
+    if [ ! -w "${log_dir}" ]; then
+        log_error "Log directory '${log_dir}' is not writable by current user"
+        log_info "Fix suggestion: chown/chmod the logs directory with current deployment user"
+        exit 1
+    fi
+
+    if [ -f "${daily_log_file}" ] && [ ! -w "${daily_log_file}" ]; then
+        log_error "Log file '${daily_log_file}' is not writable by current user"
+        log_info "Fix suggestion: update owner/permissions of '${daily_log_file}'"
+        exit 1
+    fi
+
+    if [ ! -f "${daily_log_file}" ]; then
+        if ! touch "${daily_log_file}" 2>/dev/null; then
+            log_error "Failed to create log file '${daily_log_file}'"
+            log_info "Fix suggestion: check owner/permissions for '${log_dir}'"
+            exit 1
+        fi
+    fi
+
+    log_success "Log directory and file permission checks passed"
+}
+
 # Default parameters
 MODE="remote"
 ENABLE_AUTH="true"
@@ -172,29 +261,8 @@ if [ ! -f "pyproject.toml" ]; then
     exit 1
 fi
 
-# 验证Python环境（使用uv管理的Python环境）
-log_info "Verifying Python environment..."
-PYTHON_VERSION=$(uv run python3 --version 2>&1)
-PYTHON_EXE=$(uv run python3 -c 'import sys; print(sys.executable)' 2>&1)
-PYTHON_SITE=$(uv run python3 -c 'import site; print(site.getsitepackages()[0])' 2>&1)
-log_success "Python: $PYTHON_VERSION"
-log_info "Python executable: $PYTHON_EXE"
-log_info "Site-packages: $PYTHON_SITE"
-
-# 验证关键依赖（使用uv管理的环境）
-log_info "Verifying critical dependencies..."
-if uv run python3 -c 'import fastapi, uvicorn, httpx, redis' 2>/dev/null; then
-    log_success "Core dependencies verified"
-else
-    log_error "Core dependencies verification failed, please check Docker image build"
-    uv run python3 -c 'import fastapi' 2>&1 || log_error "fastapi not available"
-    uv run python3 -c 'import uvicorn' 2>&1 || log_error "uvicorn not available"
-    uv run python3 -c 'import httpx' 2>&1 || log_error "httpx not available"
-    uv run python3 -c 'import redis' 2>&1 || log_error "redis not available"
-    exit 1
-fi
-
-log_success "All dependencies verified (using uv managed environment)"
+ensure_python_env
+ensure_logs_writable
 
 # Note: Redis will be started in tmux, so we skip the connection check here
 # Redis connection will be verified after it starts in tmux
@@ -376,12 +444,12 @@ log_info "  Authentication: $([ "$ENABLE_AUTH" = "true" ] && echo "Enabled" || e
 log_info "  Log level: $LOG_LEVEL"
 log_info "  Host: $HOST"
 log_info "  Port: $PORT"
-log_info "  Startup command: uv run uvicorn app.main:app --host $HOST --port $PORT"
+log_info "  Startup command: uv run python3 -m uvicorn app.main:app --host $HOST --port $PORT"
 log_info "  Coze API URL: ${COZE_API_URL}"
 log_info "  Coze Base URL: ${COZE_BASE_URL}"
 
 # 使用全局Python，通过uv运行
-tmux send-keys -t coze-fastapi:service.1 "cd '$PWD' && echo 'Coze FastAPI Service' && echo '====================' && export APP_MODE='$MODE' && export ENABLE_AUTH='$ENABLE_AUTH' && export COZE_LOG_LEVEL='$LOG_LEVEL' && export PORT='$PORT' && export HOST='$HOST' && export COZE_API_URL='$COZE_API_URL' && export COZE_BASE_URL='$COZE_BASE_URL' && uv run uvicorn app.main:app --host $HOST --port $PORT" Enter || {
+tmux send-keys -t coze-fastapi:service.1 "cd '$PWD' && echo 'Coze FastAPI Service' && echo '====================' && export APP_MODE='$MODE' && export ENABLE_AUTH='$ENABLE_AUTH' && export COZE_LOG_LEVEL='$LOG_LEVEL' && export PORT='$PORT' && export HOST='$HOST' && export COZE_API_URL='$COZE_API_URL' && export COZE_BASE_URL='$COZE_BASE_URL' && uv run python3 -m uvicorn app.main:app --host $HOST --port $PORT" Enter || {
     log_error "Unable to start FastAPI service"
     exit 1
 }

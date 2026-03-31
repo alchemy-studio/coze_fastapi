@@ -91,6 +91,7 @@ export COZE_BOT_ID=your_bot_id
 ```
 
 > 提示：未设置 `COZE_API_URL/COZE_BASE_URL` 时，`app/config.py` 会在 `APP_MODE=remote` 下默认连官方云 `https://api.coze.cn/v3/chat`；`APP_MODE=local` 时则回落到 `http://localhost:5000/coze/v3/chat`，与 `ai-api` 行为一致。
+> 说明：聊天主流程使用 v3 接口（`/chat`、`/chat/retrieve`）；消息列表查询使用 v1 接口（`/conversation/message/list`），服务会根据 `COZE_BASE_URL` 自动推导对应 v1 地址。
 
 ### 2. 从零开始完整部署流程
 
@@ -387,6 +388,7 @@ DELETE /coze/sessions/{session_id}
 所有可选配置项都有默认值，可在 `.env.example` 中查看完整列表，主要包括：
 
 - `COZE_API_URL`: Coze API URL（默认：`https://api.coze.cn/v3/chat`）
+- `COZE_BASE_URL`: Coze Base URL（默认：`https://api.coze.cn/v3`，用于 `chat/retrieve`，并自动推导 v1 的 `conversation/message/list`）
 - `REDIS_URL`: Redis 连接 URL（默认：`redis://localhost:6379/0`）
 - `ENABLE_AUTH`: 是否启用认证（默认：`true`）
 - `APP_MODE`: 应用模式，`remote` 或 `local`（默认：`remote`）

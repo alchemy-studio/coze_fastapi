@@ -378,6 +378,7 @@ log_info "  Host: $HOST"
 log_info "  Port: $PORT"
 log_info "  Startup command: uv run uvicorn app.main:app --host $HOST --port $PORT"
 log_info "  Coze API URL: ${COZE_API_URL}"
+log_info "  Coze Base URL: ${COZE_BASE_URL}"
 
 # 使用全局Python，通过uv运行
 tmux send-keys -t coze-fastapi:service.1 "cd '$PWD' && echo 'Coze FastAPI Service' && echo '====================' && export APP_MODE='$MODE' && export ENABLE_AUTH='$ENABLE_AUTH' && export COZE_LOG_LEVEL='$LOG_LEVEL' && export PORT='$PORT' && export HOST='$HOST' && export COZE_API_URL='$COZE_API_URL' && export COZE_BASE_URL='$COZE_BASE_URL' && uv run uvicorn app.main:app --host $HOST --port $PORT" Enter || {

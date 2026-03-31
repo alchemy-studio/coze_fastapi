@@ -30,6 +30,79 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# 检测 127.0.0.1:port 是否有 TCP 监听（不新增依赖：优先 nc，否则 bash /dev/tcp）
+coze_tcp_port_in_use() {
+    local port="$1"
+    if command -v nc >/dev/null 2>&1; then
+        nc -z 127.0.0.1 "$port" >/dev/null 2>&1
+        return $?
+    fi
+    (echo >/dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1
+    return $?
+}
+
+# 枚举当前 PID 命名空间内 redis-server 命令行中的端口线索（无 --port 则提示默认 6379）
+coze_collect_redis_server_port_hints() {
+    local line cmd p
+    if ! command -v pgrep >/dev/null 2>&1; then
+        echo "(pgrep 不可用，未枚举 redis-server 进程)"
+        return
+    fi
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        cmd=$(echo "$line" | sed 's/^[0-9][0-9]*[[:space:]]\{1,\}//')
+        if echo "$cmd" | grep -q -- '--port'; then
+            p=$(echo "$cmd" | sed -n 's/.*--port[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+            [ -n "$p" ] && echo "  - redis-server ... --port ${p}"
+        else
+            echo "  - redis-server (未见 --port，默认监听 6379)"
+        fi
+    done < <(coze_pgrep_redis_server_lines)
+}
+
+# 列出 redis-server 进程行：pid + 命令行（优先 pgrep -af；无匹配或不支持时回退 ps）
+coze_pgrep_redis_server_lines() {
+    local lines
+    lines=$(pgrep -af redis-server 2>/dev/null) || true
+    if [ -n "$lines" ]; then
+        printf '%s\n' "$lines"
+        return
+    fi
+    if ps -eo pid=,args= 2>/dev/null | grep -q '[r]edis-server'; then
+        ps -eo pid=,args= 2>/dev/null | grep '[r]edis-server' || true
+        return
+    fi
+    ps -ax -o pid=,command= 2>/dev/null | grep '[r]edis-server' || true
+}
+
+coze_warn_embedded_redis_skipped() {
+    local port="$1"
+    local _hints
+    echo "" >&2
+    echo "========================================================================" >&2
+    echo " WARNING: Coze embedded redis-server NOT started" >&2
+    echo "------------------------------------------------------------------------" >&2
+    echo " Port ${port} (COZE_REDIS_PORT) is already in use on 127.0.0.1." >&2
+    echo " This may be another Redis (including container -p mapping to this host port)," >&2
+    echo " or a non-Redis process. On the **host**, check: ss -lntp  | grep ':${port}'" >&2
+    echo " Do NOT collide with business Redis (often 6379) or other services." >&2
+    echo "" >&2
+    echo " Detected redis-server processes in this namespace (cmdline hints):" >&2
+    _hints=$(coze_collect_redis_server_port_hints)
+    if echo "$_hints" | grep -q .; then
+        echo "$_hints" >&2
+    else
+        echo "  (none matched; listener may be another process or different network namespace.)" >&2
+    fi
+    echo "" >&2
+    echo " Action: set matching REDIS_URL and COZE_REDIS_PORT in .env (or export), e.g.:" >&2
+    echo "   REDIS_URL=redis://127.0.0.1:<free_port>/0" >&2
+    echo "   COZE_REDIS_PORT=<free_port>   # optional env for this script" >&2
+    echo " If using containers, fix -p <hostPort>:... so hostPort is free, then re-run." >&2
+    echo "========================================================================" >&2
+    echo "" >&2
+}
+
 # 进程检查函数
 check_process_cleanup() {
     local service_name=$1
@@ -184,6 +257,7 @@ if [ $# -gt 0 ]; then
             echo "  test: Local mode, disable authentication, DEBUG log level, listen on 0.0.0.0"
             echo "  deployment: Remote mode, enable authentication, INFO log level, listen on 0.0.0.0 (default)"
             echo "  no parameter: Default to remote mode, enable authentication, INFO log level"
+            echo "Env (optional): COZE_REDIS_PORT (default 6380), COZE_REDIS_DATA_DIR, REDIS_URL — use .env in project root"
             exit 0
             ;;
         *)
@@ -196,13 +270,25 @@ else
     log_info "No parameter specified, using default configuration"
 fi
 
+# 与 app/config.py 一致：在项目根加载 .env（simple KEY=VAL），再应用 Redis 默认值
+if [ -f "pyproject.toml" ] && [ -f ".env" ]; then
+    set +u
+    set -a
+    # shellcheck disable=SC1091
+    . "./.env" 2>/dev/null || log_warning ".env present but failed to source (check syntax for sh compatibility)"
+    set +a
+    set -u
+fi
+COZE_REDIS_PORT="${COZE_REDIS_PORT:-6380}"
+COZE_REDIS_DATA_DIR="${COZE_REDIS_DATA_DIR:-$PWD/.coze-redis}"
+
 # Display current configuration information
 echo
 log_info "=== Coze FastAPI Service Startup Configuration ==="
 log_info "Starting Coze FastAPI service..."
 log_info "Current working directory: $PWD"
 log_info "Python environment: Global (uv managed)"
-log_info "Redis connection: localhost:6379"
+log_info "Redis connection: localhost:${COZE_REDIS_PORT} (embedded default; override COZE_REDIS_PORT / REDIS_URL)"
 log_info "Running mode: $MODE"
 log_info "Authentication: $([ "$ENABLE_AUTH" = "true" ] && echo "Enabled" || echo "Disabled")"
 log_info "Log level: $LOG_LEVEL"
@@ -274,37 +360,13 @@ set +e
 # 直接使用 pkill，参考 ai-api 的方式，避免管道问题
 # 使用精确的匹配模式，避免误杀脚本本身
 pkill -9 -f "uvicorn app.main:app" 2>/dev/null || true
-pkill -9 -f "redis-server" 2>/dev/null || true
 set -e
 sleep 3
 
 # Check and close previous services
 log_info "Checking and closing previous services..."
 
-# Check and stop Redis service
-set +e
-if pgrep -f "redis-server" &>/dev/null; then
-    log_warning "Detected Redis service, stopping..."
-    REDIS_PIDS=$(pgrep -f "redis-server" 2>/dev/null || echo "")
-    if [ -n "$REDIS_PIDS" ]; then
-        log_info "Found Redis processes: $REDIS_PIDS"
-        redis-cli shutdown 2>/dev/null || true
-        sleep 2
-        for i in {1..3}; do
-            if ! pgrep -f "redis-server" &>/dev/null; then
-                break
-            fi
-            log_warning "Redis stop retry $i/3"
-            redis-cli shutdown 2>/dev/null || true
-            sleep 2
-        done
-        if pgrep -f "redis-server" &>/dev/null; then
-            log_warning "Redis failed to shut down gracefully, force stopping..."
-            pkill -9 -f "redis-server" 2>/dev/null || true
-            sleep 2
-        fi
-    fi
-fi
+# 不再全局停止或强杀 redis-server / 不使用无 -p 的 shutdown，避免误伤业务与其它 Redis
 
 # Check and stop FastAPI service
 if pgrep -f "uvicorn.*app.main:app" &>/dev/null; then
@@ -323,13 +385,7 @@ if pgrep -f "uvicorn.*app.main:app" &>/dev/null; then
     fi
 fi
 
-# 检查端口占用
-if lsof -i :6379 &>/dev/null 2>&1; then
-    log_warning "Port 6379 is still in use, force stopping..."
-    lsof -ti :6379 2>/dev/null | xargs kill -9 2>/dev/null || true
-    sleep 1
-fi
-
+# 仅释放 FastAPI 业务端口（不误杀 6379 等业务 Redis）
 if lsof -i :${PORT} &>/dev/null 2>&1; then
     log_warning "Port ${PORT} is still in use, force stopping..."
     lsof -ti :${PORT} 2>/dev/null | xargs kill -9 2>/dev/null || true
@@ -354,10 +410,6 @@ sleep 2
 # Verify cleanup results (简化验证，不强制退出)
 log_info "Verifying service cleanup status..."
 set +e
-if pgrep -f "redis-server" &>/dev/null; then
-    log_warning "Redis process may still be running, but continuing..."
-fi
-
 if pgrep -f "uvicorn.*app.main:app" &>/dev/null; then
     log_warning "FastAPI process may still be running, but continuing..."
 fi
@@ -398,33 +450,53 @@ tmux select-layout -t coze-fastapi:service even-vertical || {
 
 # Start Redis server in panel 0
 log_info "Starting Redis server..."
+mkdir -p "$COZE_REDIS_DATA_DIR"
+SKIP_EMBEDDED_REDIS=0
+if coze_tcp_port_in_use "$COZE_REDIS_PORT"; then
+    SKIP_EMBEDDED_REDIS=1
+    coze_warn_embedded_redis_skipped "$COZE_REDIS_PORT"
+fi
 
 # Decide whether to clean Redis data based on environment
 if [ "$MODE" = "local" ]; then
     log_info "Development environment: Cleaning Redis data files to avoid format conflicts"
-    REDIS_CLEANUP_CMD="rm -f /coze-fastapi/dump.rdb /tmp/dump.rdb /tmp/redis.log 2>/dev/null; "
+    REDIS_CLEANUP_CMD=$(printf 'rm -f "%s/dump.rdb" /tmp/dump.rdb /tmp/redis.log 2>/dev/null; ' "$COZE_REDIS_DATA_DIR")
 else
     log_info "Production environment: Preserving Redis data files"
     REDIS_CLEANUP_CMD=""
 fi
 
-# 启动Redis（在tmux中前台运行，不使用--daemonize）
-tmux send-keys -t coze-fastapi:service.0 "cd '$PWD' && echo 'Redis Server' && echo '=============' && ${REDIS_CLEANUP_CMD}redis-server --port 6379 --daemonize no" Enter || {
-    log_error "Unable to start Redis server"
-    exit 1
-}
+REDIS_URL_DEFAULT="redis://127.0.0.1:${COZE_REDIS_PORT}/0"
 
-# Wait for Redis to start
+if [ "$SKIP_EMBEDDED_REDIS" = "1" ]; then
+    tmux send-keys -t coze-fastapi:service.0 "cd '$PWD' && echo 'Redis Server (embedded skipped — port ${COZE_REDIS_PORT} in use)' && echo '=============' && echo 'See WARNING on the invoking terminal (stderr).' && tail -f /dev/null" Enter || {
+        log_error "Unable to open Redis tmux panel"
+        exit 1
+    }
+else
+    tmux send-keys -t coze-fastapi:service.0 "cd '$PWD' && echo 'Redis Server' && echo '=============' && ${REDIS_CLEANUP_CMD}redis-server --port ${COZE_REDIS_PORT} --dir '${COZE_REDIS_DATA_DIR}' --dbfilename dump.rdb --daemonize no" Enter || {
+        log_error "Unable to start Redis server"
+        exit 1
+    }
+fi
+
 sleep 3
 
-# Check if Redis started successfully
-if ! redis-cli ping &>/dev/null; then
-    log_error "Redis server startup failed"
-    log_info "Checking Redis process..."
-    pgrep -f "redis-server" || log_error "Redis process not found"
-    exit 1
+if [ "$SKIP_EMBEDDED_REDIS" = "1" ]; then
+    if command -v redis-cli &>/dev/null && redis-cli -p "$COZE_REDIS_PORT" ping &>/dev/null; then
+        log_success "Redis reachable on port ${COZE_REDIS_PORT} (embedded not started; using existing listener)"
+    else
+        log_warning "Redis on port ${COZE_REDIS_PORT} did not respond to ping; confirm REDIS_URL in .env matches this port and container -p mapping on the host."
+    fi
+else
+    if ! redis-cli -p "$COZE_REDIS_PORT" ping &>/dev/null; then
+        log_error "Redis server startup failed"
+        log_info "Checking Redis process..."
+        pgrep -f "redis-server" || log_error "Redis process not found"
+        exit 1
+    fi
+    log_success "Redis server started successfully"
 fi
-log_success "Redis server started successfully"
 
 # Start FastAPI service in panel 1
 log_info "Starting FastAPI service..."
@@ -435,6 +507,7 @@ export ENABLE_AUTH="$ENABLE_AUTH"
 export COZE_LOG_LEVEL="$LOG_LEVEL"
 export PORT="$PORT"
 export HOST="$HOST"
+export REDIS_URL="${REDIS_URL:-$REDIS_URL_DEFAULT}"
 export COZE_API_URL="${COZE_API_URL:-https://api.coze.cn/v3/chat}"
 export COZE_BASE_URL="${COZE_BASE_URL:-https://api.coze.cn/v3}"
 
@@ -444,12 +517,13 @@ log_info "  Authentication: $([ "$ENABLE_AUTH" = "true" ] && echo "Enabled" || e
 log_info "  Log level: $LOG_LEVEL"
 log_info "  Host: $HOST"
 log_info "  Port: $PORT"
+log_info "  REDIS_URL: ${REDIS_URL}"
 log_info "  Startup command: uv run python3 -m uvicorn app.main:app --host $HOST --port $PORT"
 log_info "  Coze API URL: ${COZE_API_URL}"
 log_info "  Coze Base URL: ${COZE_BASE_URL}"
 
-# 使用全局Python，通过uv运行
-tmux send-keys -t coze-fastapi:service.1 "cd '$PWD' && echo 'Coze FastAPI Service' && echo '====================' && export APP_MODE='$MODE' && export ENABLE_AUTH='$ENABLE_AUTH' && export COZE_LOG_LEVEL='$LOG_LEVEL' && export PORT='$PORT' && export HOST='$HOST' && export COZE_API_URL='$COZE_API_URL' && export COZE_BASE_URL='$COZE_BASE_URL' && uv run python3 -m uvicorn app.main:app --host $HOST --port $PORT" Enter || {
+# 使用全局Python，通过uv运行（显式 REDIS_URL，与嵌入式 Redis 端口一致；可被外层已 export 的 REDIS_URL 覆盖）
+tmux send-keys -t coze-fastapi:service.1 "cd '$PWD' && echo 'Coze FastAPI Service' && echo '====================' && export APP_MODE='$MODE' && export ENABLE_AUTH='$ENABLE_AUTH' && export COZE_LOG_LEVEL='$LOG_LEVEL' && export PORT='$PORT' && export HOST='$HOST' && export REDIS_URL='${REDIS_URL}' && export COZE_API_URL='$COZE_API_URL' && export COZE_BASE_URL='$COZE_BASE_URL' && uv run python3 -m uvicorn app.main:app --host $HOST --port $PORT" Enter || {
     log_error "Unable to start FastAPI service"
     exit 1
 }
@@ -484,10 +558,10 @@ sleep 3
 
 # Check Redis connection
 log_info "Checking Redis connection status..."
-if command -v redis-cli &>/dev/null && redis-cli ping &>/dev/null; then
-    log_success "Redis service connection normal (localhost:6379)"
+if command -v redis-cli &>/dev/null && redis-cli -p "$COZE_REDIS_PORT" ping &>/dev/null; then
+    log_success "Redis service connection normal (127.0.0.1:${COZE_REDIS_PORT})"
 else
-    log_warning "Redis service connection abnormal, please confirm Redis is started"
+    log_warning "Redis service connection abnormal, please confirm Redis is started on port ${COZE_REDIS_PORT}"
 fi
 
 # Check FastAPI service
@@ -521,7 +595,7 @@ else
     log_info "Health check endpoint: http://localhost:${PORT}/coze/health"
     log_info "Authentication: Enabled, valid JWT token required"
 fi
-log_info "Redis monitoring: redis://localhost:6379"
+log_info "Redis monitoring: redis://127.0.0.1:${COZE_REDIS_PORT}/0"
 echo
 log_info "=== Management Commands ==="
 log_info "View service status: tmux attach -t coze-fastapi"
@@ -533,7 +607,7 @@ echo
 log_info "tmux session information:"
 echo "  Session name: coze-fastapi"
 echo "  Panel layout:"
-echo "    - Panel 0: Redis Server (port 6379)"
+echo "    - Panel 0: Redis Server (port ${COZE_REDIS_PORT})"
 echo "    - Panel 1: FastAPI Web Server (port ${PORT})"
 echo "    - Panel 2: Log Monitor (logs/coze-fastapi.log)"
 echo

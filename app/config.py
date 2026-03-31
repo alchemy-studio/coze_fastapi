@@ -36,7 +36,7 @@ class CozeConfig:
     poll_interval: float = 1.0  # 轮询间隔时间，单位：秒
     
     # Redis配置
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = "redis://localhost:6380/0"
     redis_prefix: str = "coze:"
     session_expire: int = 3600  # 会话过期时间（秒）
     result_expire: int = 1800   # 结果过期时间（秒）

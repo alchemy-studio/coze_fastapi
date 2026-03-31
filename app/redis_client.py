@@ -21,7 +21,7 @@ class CozeRedisClient:
     使用独立的命名空间，确保数据隔离
     """
     
-    def __init__(self, redis_url: str = "redis://localhost:6379/0"):
+    def __init__(self, redis_url: str = "redis://localhost:6380/0"):
         """
         初始化Redis客户端
         
@@ -569,17 +569,19 @@ class CozeRedisClient:
 _redis_client: Optional[CozeRedisClient] = None
 
 
-async def get_coze_redis_client(redis_url: str = "redis://localhost:6379/0") -> CozeRedisClient:
+async def get_coze_redis_client(redis_url: Optional[str] = None) -> CozeRedisClient:
     """
     获取Coze Redis客户端实例（单例模式）
     
     Args:
-        redis_url: Redis连接URL
+        redis_url: Redis连接URL（默认使用配置项 redis_url / 环境变量 REDIS_URL）
     
     Returns:
         CozeRedisClient: Redis客户端实例
     """
     global _redis_client
+    if redis_url is None:
+        redis_url = get_coze_config().redis_url
     if _redis_client is None:
         _redis_client = CozeRedisClient(redis_url)
         await _redis_client.connect()

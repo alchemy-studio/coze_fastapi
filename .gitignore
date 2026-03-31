@@ -225,3 +225,6 @@ test_coze_api.sh
 # 镜像压缩包
 coze-fastapi.tar.gz
 *.tar.gz
+
+# Coze embedded Redis data (run-service.sh)
+.coze-redis/

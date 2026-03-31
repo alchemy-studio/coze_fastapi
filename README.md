@@ -70,7 +70,7 @@ COZE_BOT_ID=your_bot_id_here
 
 # 可选配置（有默认值，可根据需要取消注释修改）
 # COZE_API_URL=https://api.coze.cn/v3/chat
-# REDIS_URL=redis://localhost:6379/0
+# REDIS_URL=redis://localhost:6380/0
 # ENABLE_AUTH=true
 # ... 更多配置项参考 .env.example
 ```
@@ -152,7 +152,7 @@ uv sync
 ```
 
 **脚本功能说明**：
-- 自动启动 Redis 服务器（如果未运行）
+- 自动启动 Coze 专用 Redis（默认端口 **6380**，若端口已被占用则跳过启动并打印警告）
 - 启动 FastAPI 服务（使用 uvicorn）
 - 启动日志监控面板
 - 自动进行健康检查
@@ -162,7 +162,7 @@ uv sync
 
 ```bash
 # 1. 确保 Redis 运行
-redis-server --port 6379
+redis-server --port 6380 --dir ./.coze-redis
 
 # 2. 安装依赖
 uv sync
@@ -222,8 +222,8 @@ cp .env.example .env
 ./run-service.sh deployment  # 或 ./run-service.sh test
 
 # 方式 2：手动启动（适合调试）
-# 1. 启动 Redis（如果容器内没有运行）
-redis-server --daemonize yes
+# 1. 启动 Redis（如果容器内没有运行；默认端口 6380，数据目录建议 ./.coze-redis）
+redis-server --port 6380 --dir ./.coze-redis --daemonize yes
 
 # 2. 启动 FastAPI 服务
 uv run uvicorn app.main:app --host 0.0.0.0 --port 6000
@@ -389,12 +389,18 @@ DELETE /coze/sessions/{session_id}
 
 - `COZE_API_URL`: Coze API URL（默认：`https://api.coze.cn/v3/chat`）
 - `COZE_BASE_URL`: Coze Base URL（默认：`https://api.coze.cn/v3`，用于 `chat/retrieve`，并自动推导 v1 的 `conversation/message/list`）
-- `REDIS_URL`: Redis 连接 URL（默认：`redis://localhost:6379/0`）
+- `REDIS_URL`: Redis 连接 URL（默认：`redis://localhost:6380/0`）
 - `ENABLE_AUTH`: 是否启用认证（默认：`true`）
 - `APP_MODE`: 应用模式，`remote` 或 `local`（默认：`remote`）
 - 更多配置项参考 `.env.example` 文件
 
 ### 端口配置
+
+
+- **Coze 嵌入式 Redis**：`run-service.sh` 默认在 **6380** 端口、数据目录 **`.coze-redis/`**，环境变量 **`COZE_REDIS_PORT`** 与 **`REDIS_URL`** 端口应一致；**勿与业务 Redis（常见 6379）共用端口或数据目录**。
+- 脚本在打印启动摘要前会**尝试 source 项目根目录的 `.env`**（需与 `pyproject.toml` 同目录），以便与 `app/config.py` 加载的变量对齐。
+- 若 **`COZE_REDIS_PORT` 已被占用**，脚本**不会**再启第二个 Redis，并在终端打印警告；可改 `.env` 中的 `REDIS_URL` 与 `COZE_REDIS_PORT`（或导出环境变量）后重跑。
+- **容器映射**：`-p <hostPort>:<containerPort>` 时，请在**宿主机**用 `ss -lntp` 等确认 **hostPort** 未被宿主其它 `redis-server` 或服务占用，再配置 `.env`。
 
 - 容器内端口：固定为 6000
 - 主机端口：可通过 `HOST_PORT` 环境变量或 `podman-run.sh` 参数配置，默认 6000
